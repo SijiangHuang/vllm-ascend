@@ -429,20 +429,60 @@ class LLMDataDistCMgrConnectorWorker():
         rank_table_path = envs_ascend.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
         with open(rank_table_path, "r", encoding="utf-8") as f:
             global_rank_table = json.load(f)
-        decode_device_list = global_rank_table["decode_device_list"]
-        for decode_device in decode_device_list:
-            server_id = decode_device["server_id"]
-            device_id = decode_device["device_id"]
-            self.decode_device_list.append((server_id, device_id))
-        prefill_device_list = global_rank_table["prefill_device_list"]
-        for prefill_device in prefill_device_list:
-            server_id = prefill_device["server_id"]
-            device_id = prefill_device["device_id"]
-            self.prefill_device_list.append((server_id, device_id))
 
-        # global_rank_table = json.dumps(global_rank_table)
+        if "device_list" not in global_rank_table:
+            pre = global_rank_table.get("prefill_device_list", [])
+            dec = global_rank_table.get("decode_device_list", [])
+            merged = {}
+            for d in (pre + dec):
+                sid = d.get("server_id")
+                did = d.get("device_id")
+                if sid is None or did is None:
+                    continue
+                merged[(sid, did)] = d
+            global_rank_table["device_list"] = list(merged.values())
+
+        seen_keys: set[tuple[str, str]] = set()
+        seen_cids: set[int] = set()
+        normalized: list[dict] = []
+        self.prefill_device_list = []  
+        self.decode_device_list = []   
+        for entry in global_rank_table["device_list"]:
+            sid = entry.get("server_id")
+            did = entry.get("device_id")
+            dip = entry.get("device_ip")
+            cid = entry.get("cluster_id")
+            if sid is None or did is None or dip is None or cid is None:
+                raise AssertionError(
+                    f"rank table missing required fields in entry: {entry}"
+                )
+            try:
+                cid_int = int(cid)
+            except Exception as e:
+                raise AssertionError(
+                    f"cluster_id must be int-like, got {cid} for {(sid, did)}"
+                ) from e
+            entry["cluster_id"] = cid_int
+
+            key = (sid, did)
+            if key in seen_keys:
+                raise AssertionError(f"duplicate (server_id, device_id) in device_list: {key}")
+            if cid_int in seen_cids:
+                raise AssertionError(f"duplicate cluster_id in device_list: {cid_int}")
+            seen_keys.add(key)
+            seen_cids.add(cid_int)
+            normalized.append(entry)
+
+            self.prefill_device_list.append(key)
+            self.decode_device_list.append(key)
+
+        global_rank_table["device_list"] = normalized
+        logger.info(
+            "LLMDataDistCMgrConnectorWorker: Using unified device_list with %d entries from %s",
+            len(normalized), rank_table_path
+        )
         return global_rank_table
-
+    
     @staticmethod
     def _get_visible_devices() -> Callable[[str], bool]:
         """
@@ -457,24 +497,18 @@ class LLMDataDistCMgrConnectorWorker():
 
     def read_agent_metadata(self, global_rank_table):
         device_filter = LLMDataDistCMgrConnectorWorker._get_visible_devices()
-        devices_type_list = []
         agent_metadata = None
-        if self.llm_datadist_role == LLMRole.PROMPT:
-            devices_type_list.append("prefill_device_list")
-        elif self.llm_datadist_role == LLMRole.DECODER:
-            devices_type_list.append("decode_device_list")
-        else:
-            devices_type_list.append("prefill_device_list")
-            devices_type_list.append("decode_device_list")
-        for device_type in devices_type_list:
-            device_list = global_rank_table[device_type]
-            device_list = [
-                d for d in device_list if d.get("server_id") == self.local_ip
-                and device_filter(d.get("device_id", ""))
-            ]
-            if len(device_list) <= self.tp_rank:
-                continue
-            device_info = device_list[self.tp_rank]
+
+        device_list = global_rank_table.get("device_list", [])
+
+        local_nodes = [
+            d for d in device_list
+            if d.get("server_id") == self.local_ip
+            and device_filter(d.get("device_id", ""))
+        ]
+
+        if len(local_nodes) > self.tp_rank:
+            device_info = local_nodes[self.tp_rank]
             super_pod_id_ = device_info.get("super_pod_id", None)
             server_id_ = device_info["server_id"]
             device_id_ = device_info["device_id"]
@@ -489,7 +523,14 @@ class LLMDataDistCMgrConnectorWorker():
                 super_device_id=super_device_id_,
                 cluster_id=cluster_id_,
             )
-        assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} and device_rank {self.rank} from rank table"
+
+        if agent_metadata is None:
+            candidates = [str(n.get("device_id", "")) for n in local_nodes]
+            raise AssertionError(
+                f"Cannot locate local agent from rank table 'device_list'. "
+                f"server_id={self.local_ip}, tp_rank={self.tp_rank}, "
+                f"visible_candidates={candidates}"
+            )
         return agent_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, Tuple[torch.Tensor]]):

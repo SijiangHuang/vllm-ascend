@@ -1,22 +1,16 @@
 import argparse
 import json
 import os
-
 import torch.distributed as dist
-
 from vllm_ascend.utils import AscendSocVersion, init_ascend_soc_version, get_ascend_soc_version
 
 parser = argparse.ArgumentParser(
     description="Arguments of rank table generator", )
 parser.add_argument("--local-host", type=str, required=True, help="local ip")
-parser.add_argument("--prefill-device-cnt",
+parser.add_argument("--device-cnt",
                     type=int,
                     required=True,
-                    help="number of prefill devices")
-parser.add_argument("--decode-device-cnt",
-                    type=int,
-                    required=True,
-                    help="number of decode devices")
+                    help="number of devices")
 parser.add_argument("--local-device-ids",
                     type=str,
                     required=False,
@@ -27,8 +21,7 @@ parser.add_argument("--ranktable-path",
                     help="output rank table path")
 args = parser.parse_args()
 local_host = args.local_host
-prefill_device_cnt = args.prefill_device_cnt
-decode_device_cnt = args.decode_device_cnt
+device_cnt = args.device_cnt
 
 print("enter py")
 
@@ -76,7 +69,7 @@ local_device_list: list[dict[str, str]] = list()
 if local_rank == "0":
     super_pod_id = "0"
     for idx in range(len(local_device_ids)):
-        device_id = local_device_ids[idx]
+        device_id = int(local_device_ids[idx])
         chip_id = device_id % chips_per_card
         card_id = device_id // chips_per_card
         if soc_info == AscendSocVersion.A3:
@@ -117,18 +110,14 @@ cnt = 1
 for device_info in global_device_list:  # type: ignore[assignment]
     device_info["cluster_id"] = str(cnt)
     cnt += 1
-assert (prefill_device_cnt + decode_device_cnt) <= len(global_device_list), \
+assert device_cnt <= len(global_device_list), \
 "prefill_device_cnt + decode_device_cnt must be less than or equal to number of all devices in cluster"
 ranktable = {
     "version":
     "1.2",
     "server_count":
     str(world_size),
-    "prefill_device_list":
-    global_device_list[:prefill_device_cnt],
-    "decode_device_list":
-    global_device_list[prefill_device_cnt:prefill_device_cnt +
-                       decode_device_cnt],
+    "device_list": global_device_list,
     "status":
     "completed"
 }

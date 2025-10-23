@@ -23,14 +23,9 @@ while [[ $# -gt 0 ]]; do
             NETWORK_CARD_NAME="$1"
             shift
             ;;
-        --prefill-device-cnt)
+        --device-cnt)
             shift
-            PREFILL_DEVICE_CNT="$1"
-            shift
-            ;;
-        --decode-device-cnt)
-            shift
-            DECODE_DEVICE_CNT="$1"
+            DEVICE_CNT="$1"
             shift
             ;;
         --local-device-ids)
@@ -84,5 +79,5 @@ if [[ -n "${GEN_RANKTABLE}" || ! -e ${PWD}/ranktable.json ]]; then
         --node_rank ${NODE_RANK} \
         --master_addr ${MASTER_ADDR} \
         --master_port ${MASTER_PORT} \
-        gen_ranktable.py --local-host $LOCAL_HOST --prefill-device-cnt $PREFILL_DEVICE_CNT --decode-device-cnt $DECODE_DEVICE_CNT $OPTIONAL_SECTION
+        gen_ranktable.py --local-host $LOCAL_HOST --device-cnt $DEVICE_CNT $OPTIONAL_SECTION
 fi
